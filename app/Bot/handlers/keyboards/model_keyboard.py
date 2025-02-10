@@ -1,9 +1,15 @@
-from aiogram.types import Message, BufferedInputFile
+from aiogram.types import Message, BufferedInputFile, FSInputFile, InputFile
 from aiogram.utils.keyboard import InlineKeyboardMarkup
 from app.core.logging import logs_bot
 from aiogram import Bot
 from app.core.config import settings
 import aiohttp
+from app.core.ssl_config import create_ssl_context, get_connector
+import tempfile
+import os
+import re
+from io import BytesIO
+from typing import Optional, Union
 
 bot_message = Bot(token=settings.config.bot_token) 
 
@@ -74,72 +80,124 @@ async def send_message(chat_id: int, text: str, parse_mode: str = None):
         parse_mode=parse_mode
     )
 
-async def download_and_send_file(chat_id: int, file_url: str, send_func, caption: str = None, parse_mode: str = None):
+async def get_google_drive_direct_url(file_url: str) -> str:
     """
-    Скачивает файл и отправляет его в чат используя указанную функцию отправки.
+    Получает прямую ссылку на скачивание файла с Google Drive
+    """
+    if "drive.google.com" not in file_url:
+        return file_url
+        
+    file_id = None
+    
+    # Извлекаем ID файла из разных форматов URL Google Drive
+    if "/file/d/" in file_url:
+        file_id = file_url.split("/file/d/")[1].split("/")[0]
+    elif "id=" in file_url:
+        file_id = file_url.split("id=")[1].split("&")[0]
+        
+    if not file_id:
+        raise ValueError("Не удалось получить ID файла из URL Google Drive")
+        
+    return f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+
+async def download_file(url: str) -> tuple[bytes, str, str]:
+    """
+    Скачивает файл по URL и возвращает его содержимое и тип
+    
+    Args:
+        url: URL файла для скачивания
+        
+    Returns:
+        tuple: (файл в байтах, content_type, расширение файла)
+    """
+    ssl_context = create_ssl_context(url)
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+        async with session.get(url) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                await logs_bot("error", f"Download failed. Status: {response.status}, Response: {error_text}")
+                raise ValueError(f"Не удалось скачать файл: {url}")
+                
+            content_type = response.headers.get('Content-Type', 'application/octet-stream')
+            ext = get_file_extension(content_type)
+            return await response.read(), content_type, ext
+
+def get_file_extension(content_type: str) -> str:
+    """Определяет расширение файла на основе content-type"""
+    if 'video' in content_type: return '.mp4'
+    if 'image/gif' in content_type: return '.gif'
+    if 'image' in content_type: return '.jpg'
+    return '.dat'
+
+async def send_media(
+    chat_id: int,
+    file_url: str,
+    media_type: str,
+    caption: Optional[str] = None,
+    parse_mode: str = "HTML"
+) -> dict:
+    """
+    Универсальная функция для отправки медиа-файлов
+    
+    Args:
+        chat_id: ID чата
+        file_url: URL медиа-файла
+        media_type: Тип медиа (photo/video/animation/document)
+        caption: Подпись к медиа
+        parse_mode: Режим форматирования текста
     """
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file_url) as response:
-                print(response.status)
-                if response.status != 200:
-                    raise ValueError(f"Не удалось скачать файл: {response.status}")
-
-                file_data = await response.read()  # Await the coroutine to get the file data
-
-                # Создаем объект InputFile из скачанных данных
-                file = BufferedInputFile(file_data, filename=file_url.split('/')[-1])
-                print(file)
-                # Отправляем файл
-                result = await send_func(
-                    chat_id=chat_id,
-                    file=file,
-                    caption=caption,
-                    parse_mode=parse_mode
-                )
-                print(result)
-                if not result:
-                    raise ValueError("Ошибка при отправке файла.")
+        file_data, content_type, ext = await download_file(file_url)
+        file_name = f"file{ext}"
+        
+        input_file = BufferedInputFile(file_data, filename=file_name)
+        
+        methods = {
+            'photo': bot_message.send_photo,
+            'video': bot_message.send_video,
+            'animation': bot_message.send_animation,
+            'document': bot_message.send_document
+        }
+        
+        send_method = methods.get(media_type)
+        if not send_method:
+            raise ValueError(f"Неподдерживаемый тип медиа: {media_type}")
+            
+        params = {
+            'chat_id': chat_id,
+            media_type: input_file,
+            'caption': caption,
+            'parse_mode': parse_mode
+        }
+        
+        # Добавляем специальные параметры для видео
+        if media_type == 'video':
+            params.update({'supports_streaming': True, 'width': 1280, 'height': 720})
+            
+        response = await send_method(**params)
+        if not response:
+            raise ValueError(f"Telegram API не вернул ответ при отправке {media_type}")
+            
+        return response
+        
     except Exception as e:
-        await logs_bot("error", f"Error downloading/sending file: {str(e)}")
-        raise
+        error_msg = f"Ошибка при отправке {media_type}: {str(e)}"
+        await logs_bot("error", error_msg)
+        raise ValueError(error_msg)
 
-async def send_photo(chat_id: int, photo: str, caption: str = None, parse_mode: str = None):
-    """Отправляет фото в указанный чат."""
-    await download_and_send_file(
-        chat_id=chat_id,
-        file_url=photo,
-        send_func=bot_message.send_photo,
-        caption=caption,
-        parse_mode=parse_mode
-    )
+# Создаем специализированные функции на основе универсальной
+async def send_photo(chat_id: int, photo: str, caption: str = "", parse_mode: str = "HTML"):
+    """Отправляет фото в чат"""
+    return await send_media(chat_id, photo, 'photo', caption, parse_mode)
 
-async def send_video(chat_id: int, video: str, caption: str = None, parse_mode: str = None):
-    """Отправляет видео в указанный чат."""
-    await download_and_send_file(
-        chat_id=chat_id,
-        file_url=video,
-        send_func=bot_message.send_video,
-        caption=caption,
-        parse_mode=parse_mode
-    )
+async def send_video(chat_id: int, video: str, caption: str = None, parse_mode: str = "HTML"):
+    """Отправляет видео в чат"""
+    return await send_media(chat_id, video, 'video', caption, parse_mode)
 
-async def send_animation(chat_id: int, animation: str, caption: str = None, parse_mode: str = None):
-    """Отправляет анимацию в указанный чат."""
-    await download_and_send_file(
-        chat_id=chat_id,
-        file_url=animation,
-        send_func=bot_message.send_animation,
-        caption=caption,
-        parse_mode=parse_mode
-    )
+async def send_animation(chat_id: int, animation: str, caption: str = "", parse_mode: str = "HTML"):
+    """Отправляет GIF-анимацию в чат"""
+    return await send_media(chat_id, animation, 'animation', caption, parse_mode)
 
-async def send_document(chat_id: int, document: str, caption: str = None, parse_mode: str = None):
-    """Отправляет документ в указанный чат."""
-    await download_and_send_file(
-        chat_id=chat_id,
-        file_url=document,
-        send_func=bot_message.send_document,
-        caption=caption,
-        parse_mode=parse_mode
-    )
+async def send_document(chat_id: int, document: str, caption: str = None, parse_mode: str = "HTML"):
+    """Отправляет документ в чат"""
+    return await send_media(chat_id, document, 'document', caption, parse_mode)

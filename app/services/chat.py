@@ -4,6 +4,8 @@ from app.db.database import get_table_data, add_to_table
 from app.core.logging import logs_bot
 from app.Bot.handlers.keyboards.model_keyboard import send_photo, send_video, send_animation, send_document, send_message
 from app.db.models import User, Notification
+from app.core.ssl_config import get_connector
+import aiohttp
 
 router = APIRouter()
 
@@ -50,23 +52,73 @@ def get_message_params(http_message: dict) -> dict:
 
 async def send_content(params: dict):
     """Отправка контента пользователю или скачивание файла."""
-    await logs_bot("info", f"Preparing to send: type={params['message_type']}, chat_id={params['chat_id']}, content={params['content']}")
-    
-    if not params["content"]:
-        raise ValueError("Content cannot be empty")
-        
     try:
-        if params["message_type"] == "text":
-            await send_message(chat_id=params["chat_id"], text=params["content"], parse_mode="HTML")
-        elif params["message_type"] in ["photo", "video", "animation", "document"]:
-            await globals()[f'send_{params["message_type"]}'](chat_id=params["chat_id"], **{params["message_type"]: params["content"], "caption": params.get("caption", ""), "parse_mode": "HTML"})
-        else:
-            await logs_bot("warning", f"Unsupported message type: {params['message_type']}")
-            raise ValueError(f"Unsupported message type: {params['message_type']}")
+        await logs_bot(
+            "info",
+            f"Preparing to send: type={params['message_type']}, chat_id={params['chat_id']}, content={params['content']}"
+        )
+        
+        # Проверяем валидность chat_id
+        try:
+            chat_id = int(params['chat_id'])
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid chat_id: {params['chat_id']}")
+            
+        if not params["content"]:
+            raise ValueError("Content cannot be empty")
+            
+        # Проверяем существование пользователя
+        users = await get_table_data(User)
+        user_exists = any(user["user_id"] == chat_id for user in users)
+        if not user_exists:
+            raise ValueError(f"User with chat_id {chat_id} not found in database")
+        
+        try:
+            if params["message_type"] == "text":
+                await send_message(
+                    chat_id=chat_id,
+                    text=params["content"],
+                    parse_mode="HTML"
+                )
+            elif params["message_type"] == "photo":
+                await send_photo(
+                    chat_id=chat_id,
+                    photo=params["content"],
+                    caption=params["caption"],
+                    parse_mode="HTML"
+                )
+            elif params["message_type"] == "video":
+                await send_video(
+                    chat_id=chat_id,
+                    video=params["content"],
+                    caption=params["caption"],
+                    parse_mode="HTML"
+                )
+            elif params["message_type"] == "animation":
+                await send_animation(
+                    chat_id=chat_id,
+                    animation=params["content"],
+                    caption=params.get("caption", ""),
+                    parse_mode="HTML"
+                )
+            elif params["message_type"] == "document":
+                await send_document(
+                    chat_id=chat_id,
+                    document=params["content"],
+                    caption=params["caption"],
+                    parse_mode="HTML"
+                )
+            else:
+                await logs_bot("warning", f"Unsupported message type: {params['message_type']}")
+                raise ValueError(f"Unsupported message type: {params['message_type']}")
+            
+        except Exception as e:
+            await logs_bot("error", f"Error sending {params['message_type']}: {str(e)}")
+            raise
             
     except Exception as e:
-        await logs_bot("error", f"Error in sending message: {str(e)}")
-        raise e
+        await logs_bot("error", f"Error in send_content: {str(e)}")
+        raise
 
 
 async def log_notification(params: dict):
@@ -120,9 +172,11 @@ async def send_message_endpoint(http_message: dict):
         await validate_and_log_request(http_message)
         
         message_params = get_message_params(http_message)
-        await send_content(message_params)
         
-        await log_notification(message_params)
+        # Создаем сессию с SSL контекстом
+        async with aiohttp.ClientSession(connector=get_connector()) as session:
+            await send_content(message_params)
+            await log_notification(message_params)
         
         await logs_bot("info", "Message sent successfully")
         return {"status": "success", "message": "Контент успешно отправлен"}
@@ -130,7 +184,7 @@ async def send_message_endpoint(http_message: dict):
     except Exception as e:
         error_msg = f"Error in message_answer endpoint: {str(e)}"
         await logs_bot("error", error_msg)
-        return {"status": "error", "message": "Ошибка при отправке контента"}
+        return {"status": "error", "message": error_msg}
 
 
 @router.get("/ping")
