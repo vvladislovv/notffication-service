@@ -3,15 +3,13 @@ from fastapi.security import APIKeyHeader
 from contextlib import asynccontextmanager
 import aiohttp
 from app.services.chat import router as chat_router
-from app.core.ssl_config import create_ssl_context
 
 
 session = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global session
-    ssl_context = create_ssl_context()
-    session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context))
+    session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
     yield
     await session.close()
 

@@ -1,21 +1,24 @@
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter
 from app.db.database import get_table_data, add_to_table
 from app.core.logging import logs_bot
-from app.Bot.handlers.keyboards.model_keyboard import send_photo, send_video, send_animation, send_document, send_message
+from app.Bot.handlers.keyboards.telegram_sender import (
+    send_message,
+    send_photo,
+    send_video,
+    send_animation,
+    send_document
+)
 from app.db.models import User, Notification
-from app.core.ssl_config import get_connector
-import aiohttp
+
 
 router = APIRouter()
 
 async def validate_and_log_request(http_message: dict):
     """
-    Валидация и логирование входящего запроса
+    Валидация и логирование входящего запроса.
     
-    Проверяет:
-    - Наличие обязательных полей
-    - Существование пользователя в базе
+    Проверяет наличие обязательных полей и существование пользователя в базе данных.
+    Логирует информацию о полученном запросе.
     """
     await logs_bot("info", f"Received request with data: {http_message}")
     
@@ -33,10 +36,10 @@ async def validate_and_log_request(http_message: dict):
 
 def get_message_params(http_message: dict) -> dict:
     """
-    Подготовка параметров сообщения
+    Подготовка параметров сообщения.
     
-    Проверяет корректность типа сообщения и формирует словарь с параметрами
-
+    Проверяет корректность типа сообщения и формирует словарь с параметрами,
+    включая chat_id, content и caption.
     """
     valid_types = ["text", "photo", "video", "animation", "document"]
     message_type = http_message.get("type")
@@ -50,79 +53,73 @@ def get_message_params(http_message: dict) -> dict:
         "caption": http_message.get("caption", "")
     }
 
-async def send_content(params: dict):
-    """Отправка контента пользователю или скачивание файла."""
+# Общий обработчик для всех типов сообщений
+async def send_content(chat_id: int, params: dict):
+    """
+    Отправляет контент пользователю в зависимости от типа сообщения.
+    
+    Определяет функцию-обработчик для каждого типа сообщения (text, photo, video, animation, document)
+    и вызывает соответствующую функцию отправки с необходимыми аргументами.
+    """
+    handlers = {
+        "text": {
+            "func": send_message,
+            "args": {"chat_id": chat_id, "text": params["content"]}
+        },
+        "photo": {
+            "func": send_photo,
+            "args": {
+                "photo": params["content"],
+                "caption": params.get("caption"),
+                "chat_id": chat_id
+            }
+        },
+        "video": {
+            "func": send_video,
+            "args": {
+                "video": params["content"],
+                "caption": params.get("caption"),
+                "chat_id": chat_id
+            }
+        },
+        "animation": {
+            "func": send_animation,
+            "args": {
+                "animation": params["content"],
+                "caption": params.get("caption", ""),
+                "chat_id": chat_id
+            }
+        },
+        "document": {
+            "func": send_document,
+            "args": {
+                "document": params["content"],
+                "caption": params.get("caption"),
+                "chat_id": chat_id
+            }
+        }
+    }
+
+    message_type = params["message_type"]
+    if message_type not in handlers:
+        await logs_bot("warning", f"Unsupported message type: {message_type}")
+        raise ValueError(f"Unsupported message type: {message_type}")
+
     try:
-        await logs_bot(
-            "info",
-            f"Preparing to send: type={params['message_type']}, chat_id={params['chat_id']}, content={params['content']}"
+        handler = handlers[message_type]
+        await handler["func"](
+            **handler["args"]
         )
-        
-        # Проверяем валидность chat_id
-        try:
-            chat_id = int(params['chat_id'])
-        except (ValueError, TypeError):
-            raise ValueError(f"Invalid chat_id: {params['chat_id']}")
-            
-        if not params["content"]:
-            raise ValueError("Content cannot be empty")
-            
-        # Проверяем существование пользователя
-        users = await get_table_data(User)
-        user_exists = any(user["user_id"] == chat_id for user in users)
-        if not user_exists:
-            raise ValueError(f"User with chat_id {chat_id} not found in database")
-        
-        try:
-            if params["message_type"] == "text":
-                await send_message(
-                    chat_id=chat_id,
-                    text=params["content"],
-                    parse_mode="HTML"
-                )
-            elif params["message_type"] == "photo":
-                await send_photo(
-                    chat_id=chat_id,
-                    photo=params["content"],
-                    caption=params["caption"],
-                    parse_mode="HTML"
-                )
-            elif params["message_type"] == "video":
-                await send_video(
-                    chat_id=chat_id,
-                    video=params["content"],
-                    caption=params["caption"],
-                    parse_mode="HTML"
-                )
-            elif params["message_type"] == "animation":
-                await send_animation(
-                    chat_id=chat_id,
-                    animation=params["content"],
-                    caption=params.get("caption", ""),
-                    parse_mode="HTML"
-                )
-            elif params["message_type"] == "document":
-                await send_document(
-                    chat_id=chat_id,
-                    document=params["content"],
-                    caption=params["caption"],
-                    parse_mode="HTML"
-                )
-            else:
-                await logs_bot("warning", f"Unsupported message type: {params['message_type']}")
-                raise ValueError(f"Unsupported message type: {params['message_type']}")
-            
-        except Exception as e:
-            await logs_bot("error", f"Error sending {params['message_type']}: {str(e)}")
-            raise
-            
     except Exception as e:
-        await logs_bot("error", f"Error in send_content: {str(e)}")
+        await logs_bot("error", f"Error sending {message_type}: {str(e)}")
         raise
 
-
 async def log_notification(params: dict):
-    """Сохранение информации об отправленном уведомлении в базу данных"""
+    """
+    Сохраняет информацию об отправленном уведомлении в базу данных.
+    
+    Формирует запись уведомления с user_id и типом контента и добавляет её в таблицу Notification.
+    """
     notification_entry = {
         "user_id": params["chat_id"],
         "type_content": params["message_type"],
@@ -131,8 +128,11 @@ async def log_notification(params: dict):
 
 @router.get("/users")
 async def get_users():
-    """Получение списка всех пользователей из базы данных"""
+    """
+    Получает список всех пользователей из базы данных.
     
+    Возвращает список пользователей с их user_id, first_name, last_name и created_at.
+    """
     users = await get_table_data(User)
     return {
         "users": [
@@ -149,14 +149,13 @@ async def get_users():
 @router.post("/message_answer")
 async def send_message_endpoint(http_message: dict):
     """
-    Эндпоинт для отправки различных типов сообщений пользователям
+    Эндпоинт для отправки различных типов сообщений пользователям.
     
     Этапы обработки:
-    1. Валидация входящего запроса
-    2. Подготовка параметров сообщения
-    3. Отправка контента пользователю
-    4. Логирование уведомления
-
+    1. Валидация входящего запроса.
+    2. Подготовка параметров сообщения.
+    3. Отправка контента пользователю.
+    4. Логирование уведомления.
 
     Формат запроса для /message_answer:
     {
@@ -166,20 +165,16 @@ async def send_message_endpoint(http_message: dict):
         "caption": "подпись (опционально)"
     }
     """
-
-    
     try:
         await validate_and_log_request(http_message)
         
         message_params = get_message_params(http_message)
         
-        # Создаем сессию с SSL контекстом
-        async with aiohttp.ClientSession(connector=get_connector()) as session:
-            await send_content(message_params)
-            await log_notification(message_params)
-        
+        await send_content(message_params["chat_id"], message_params)
+        await log_notification(message_params)
+    
         await logs_bot("info", "Message sent successfully")
-        return {"status": "success", "message": "Контент успешно отправлен"}
+        return {"status": "success", "message": "Контент успешно отправлен"} # problems
         
     except Exception as e:
         error_msg = f"Error in message_answer endpoint: {str(e)}"
@@ -189,7 +184,11 @@ async def send_message_endpoint(http_message: dict):
 
 @router.get("/ping")
 async def ping():
-    """Эндпоинт для проверки работоспособности сервиса"""
+    """
+    Эндпоинт для проверки работоспособности сервиса.
+    
+    Возвращает статус сервиса с сообщением "PONG!".
+    """
     try:
         return {"status": "success", "message": "PONG!"}
     except Exception as e:

@@ -1,15 +1,13 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 from typing import Any, List, Optional
 import os
-
+from app.db.models import Base
 
 engine = create_async_engine(settings.config.DATABASE_URL, echo=False)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-Base = declarative_base()
 
 async def init_db():
     """
@@ -29,7 +27,7 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def add_to_table(table_class: Base, data: dict) -> Any:
+async def add_to_table(table_class: object, data: dict) -> Any:
     """
     Общая функция для добавления данных в любую таблицу с проверкой  
     
@@ -50,7 +48,7 @@ async def add_to_table(table_class: Base, data: dict) -> Any:
                 )
             )
 
-            existing_record: Optional[Base] = existing.scalar_one_or_none()
+            existing_record: Optional[object] = existing.scalar_one_or_none()
             
             if existing_record:
                 # Обновляем существующую запись
@@ -61,7 +59,7 @@ async def add_to_table(table_class: Base, data: dict) -> Any:
         
         # Проверяем, можно ли создать новую запись
         try:
-            new_record: Base = table_class(**data)
+            new_record: object = table_class(**data)
             session.add(new_record)
             await session.commit()
             await session.refresh(new_record)
@@ -72,7 +70,7 @@ async def add_to_table(table_class: Base, data: dict) -> Any:
             print(f"Database insertion error: {str(e)}")
             return False
 
-async def get_table_data(table_class: Base) -> List[dict]:
+async def get_table_data(table_class: object) -> List[dict]:
     """
     Функция для получения данных из указанной таблицы в формате JSON.
     
@@ -84,10 +82,10 @@ async def get_table_data(table_class: Base) -> List[dict]:
     """
     async with async_session() as session:
         result = await session.execute(select(table_class))
-        records: List[Base] = result.scalars().all()
+        records: List[object] = result.scalars().all()
         return [record.__dict__ for record in records]
 
-async def delete_table(table_class: Base, user_id: str) -> bool:
+async def delete_table(table_class: object, user_id: str) -> bool:
     """
     Удаляет чат из базы данных по его идентификатору.
     

@@ -1,8 +1,10 @@
 from sqlalchemy import Column, Integer, String, DateTime,TIMESTAMP,JSON
 from sqlalchemy.sql import func
 from datetime import datetime
-from .database import Base
 
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
 
 class User(Base):
     __tablename__ = "users"
